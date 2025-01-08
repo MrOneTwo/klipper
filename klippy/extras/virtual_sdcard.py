@@ -15,6 +15,7 @@ DEFAULT_ERROR_GCODE = """
 
 class VirtualSD:
     def __init__(self, config):
+        logging.info(f"[MICHAL] VirtualSD __init__")
         self.printer = config.get_printer()
         self.printer.register_event_handler("klippy:shutdown",
                                             self.handle_shutdown)
@@ -65,6 +66,7 @@ class VirtualSD:
             return False, ""
         return True, "sd_pos=%d" % (self.file_position,)
     def get_file_list(self, check_subdirs=False):
+        logging.info(f"[MICHAL] looking for files in {self.sdcard_dirname}")
         if check_subdirs:
             flist = []
             for root, dirs, files in os.walk(
