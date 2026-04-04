@@ -6,6 +6,9 @@
 import logging, socket, os, sys, errno, collections
 import gcode
 
+from libcoapy import *
+from functools import partial
+
 try:
     import msgspec
 except ImportError:
@@ -184,6 +187,68 @@ class ServerSocket:
                     client.close()
         return False, ""
 
+class ServerSocketUDP:
+    def __init__(self, webhooks, printer):
+        self.printer = printer
+        self.webhooks = webhooks
+        self.reactor = printer.get_reactor()
+        self.sock = self.fd_handle = None
+        self.clients = {}
+        start_args = printer.get_start_args()
+        server_address = start_args.get('apiserver')
+        is_fileinput = (start_args.get('debuginput') is not None)
+        if not server_address or is_fileinput:
+            # Do not enable server
+            return
+        self._remove_socket_file(server_address)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.sock.setblocking(0)
+        self.sock.bind(server_address)
+        printer.register_event_handler(
+            'klippy:disconnect', self._handle_disconnect)
+        printer.register_event_handler(
+            "klippy:analyze_shutdown", self._handle_analyze_shutdown)
+
+        client = ClientConnection(self, self.sock)
+        self.clients[client.uid] = client
+
+    def _handle_disconnect(self):
+        for client in list(self.clients.values()):
+            client.close()
+        if self.sock is not None:
+            self.reactor.unregister_fd(self.fd_handle)
+            try:
+                self.sock.close()
+            except socket.error:
+                pass
+
+    def _handle_analyze_shutdown(self, msg, details):
+        for client in self.clients.values():
+            client.dump_request_log()
+
+    def _remove_socket_file(self, file_path):
+        try:
+            os.remove(file_path)
+        except OSError:
+            if os.path.exists(file_path):
+                logging.exception(
+                    "webhooks: Unable to delete socket file '%s'"
+                    % (file_path))
+                raise
+
+    def pop_client(self, client_id):
+        self.clients.pop(client_id, None)
+
+    def stats(self, eventtime):
+        # Called once per second - check for idle clients
+        for client in list(self.clients.values()):
+            if client.is_blocking:
+                client.blocking_count -= 1
+                if client.blocking_count < 0:
+                    logging.info("Closing unresponsive client %s", client.uid)
+                    client.close()
+        return False, ""
+
 class ClientConnection:
     def __init__(self, server, sock):
         self.printer = server.printer
@@ -199,6 +264,19 @@ class ClientConnection:
         self.blocking_count = 0
         self.set_client_info("?", "New connection")
         self.request_log = collections.deque([], REQUEST_LOG_SIZE)
+
+        # Context holds resources in a collection.
+        self.coap = CoapContext()
+        self.coap.addEndpoint("/tmp/klippy_uds")
+
+        time_rs = CoapResource(self.coap, "t")
+        time_rs.addHandler(self.time_handler)
+        self.coap.addResource(time_rs)
+
+    def time_handler(resource, session, request, query, response):
+        import datetime
+        now = datetime.datetime.now()
+        response.payload = str(now)
 
     def dump_request_log(self):
         out = []
@@ -236,7 +314,59 @@ class ClientConnection:
 
     def process_received(self, eventtime):
         try:
-            data = self.sock.recv(4096)
+            data, remote_address = self.sock.recvfrom(4096)
+            data_len = len(data)
+            ct_data = (ct.c_uint8 * data_len).from_buffer_copy(data)
+            pdu_ptr = coap_pdu_init(0, 0, 0, COAP_DEFAULT_MTU)
+
+            proto = coap_proto_t.COAP_PROTO_UDP
+
+            result = coap_pdu_parse(
+                proto,
+                ct.cast(ct_data, ct.POINTER(ct.c_uint8)),
+                data_len,
+                pdu_ptr
+            )
+
+            if result >= 1:
+                print("got {} from {}".format(data, remote_address))
+                pdu = CoapPDU(pdu_ptr)
+                print(pdu.uri)
+                if pdu.type == coap_pdu_type_t.COAP_MESSAGE_CON:
+                    print("COAP_MESSAGE_CON")
+                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_NON:
+                    print("COAP_MESSAGE_NON")
+                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_ACK:
+                    print("COAP_MESSAGE_ACK")
+                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_RST:
+                    print("COAP_MESSAGE_RST")
+
+                if pdu.code == coap_pdu_code_t.COAP_EMPTY_CODE:
+                    print("COAP_EMPTY_CODE")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_GET:
+                    print("COAP_REQUEST_CODE_GET")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_POST:
+                    print("COAP_REQUEST_CODE_POST")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_PUT:
+                    print("COAP_REQUEST_CODE_PUT")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_DELETE:
+                    print("COAP_REQUEST_CODE_DELETE")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_FETCH:
+                    print("COAP_REQUEST_CODE_FETCH")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_PATCH:
+                    print("COAP_REQUEST_CODE_PATCH")
+                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_IPATCH:
+                    print("COAP_REQUEST_CODE_IPATCH")
+
+                res = self.coap.getResource(pdu.uri)
+                if res:
+                    handler = res.handlers.get(pdu.code, None)
+                    if handler:
+                        handler(self.coap, None, None, None)
+
+            else:
+                print("Failed to parse PDU!")
+
         except socket.error as e:
             # If bad file descriptor allow connection to be
             # closed by the data check
@@ -244,6 +374,8 @@ class ClientConnection:
                 data = b""
             else:
                 return
+
+
         if not data:
             # Socket Closed
             self.close()
@@ -322,7 +454,7 @@ class WebHooks:
         self.register_endpoint("emergency_stop", self._handle_estop_request)
         self.register_endpoint("register_remote_method",
                                self._handle_rpc_registration)
-        self.sconn = ServerSocket(self, printer)
+        self.sconn = ServerSocketUDP(self, printer)
 
     def register_endpoint(self, path, callback):
         if path in self._endpoints:
@@ -565,3 +697,29 @@ def add_early_printer_objects(printer):
     printer.add_object('webhooks', WebHooks(printer))
     GCodeHelper(printer)
     QueryStatusHelper(printer)
+
+    # def time_handler(resource, session, request, query, response):
+    #     import datetime
+    #     now = datetime.datetime.now()
+    #     response.payload = str(now)
+
+    # ctx = CoapContext()
+
+    # #ctx.addEndpoint("coap://localhost")
+    # ctx.addEndpoint("/tmp/klippy_uds")
+
+    # time_rs = CoapResource(ctx, "time")
+    # time_rs.addHandler(time_handler)
+    # ctx.addResource(time_rs)
+
+    # def callback_wrapper(ctx, ts: float):
+    #     print(ts)
+    #     ctx.io_process()
+
+    # handler = partial(callback_wrapper, ctx)
+
+    # coap_fd = coap_context_get_coap_fd(ctx.lcoap_ctx)
+
+    # printer.reactor.register_fd(coap_fd, handler)
+
+
