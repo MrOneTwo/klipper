@@ -201,16 +201,40 @@ class ServerSocketUDP:
             # Do not enable server
             return
         self._remove_socket_file(server_address)
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        self.sock.setblocking(0)
-        self.sock.bind(server_address)
+
+        # # Creating the socket here.
+        # self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # self.sock.setblocking(0)
+        # self.sock.bind(server_address)
+
+        # endpoint creates the socket --------------------------------
+        self.coap = CoapContext()
+        ep = self.coap.addEndpoint("coap://%2Ftmp%2Fklippy_uds")
+        #print(ep.uri)
+        # This is a C structure so accessing sock might be tricky.
+        c_ep_ptr = ep.lcoap_endpoint
+        sock_fd = c_ep_ptr.contents.sock.fd
+
+        time_rs = CoapResource(self.coap, "time")
+        time_rs.addHandler(self.time_handler)
+        self.coap.addResource(time_rs)
+        # ------------------------------------------------------------
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM, fileno=sock_fd)
+        logging.info(f"CoAP server listening on {sock.getsockname()}")
+
+        client = ClientConnection(self, sock)
+        self.clients[client.uid] = client
+
         printer.register_event_handler(
             'klippy:disconnect', self._handle_disconnect)
         printer.register_event_handler(
             "klippy:analyze_shutdown", self._handle_analyze_shutdown)
 
-        client = ClientConnection(self, self.sock)
-        self.clients[client.uid] = client
+    def time_handler(self, resource, session, request, query, response):
+        import datetime
+        now = datetime.datetime.now()
+        response.payload = str(now)
 
     def _handle_disconnect(self):
         for client in list(self.clients.values()):
@@ -265,19 +289,6 @@ class ClientConnection:
         self.set_client_info("?", "New connection")
         self.request_log = collections.deque([], REQUEST_LOG_SIZE)
 
-        # Context holds resources in a collection.
-        self.coap = CoapContext()
-        self.coap.addEndpoint("/tmp/klippy_uds")
-
-        time_rs = CoapResource(self.coap, "t")
-        time_rs.addHandler(self.time_handler)
-        self.coap.addResource(time_rs)
-
-    def time_handler(resource, session, request, query, response):
-        import datetime
-        now = datetime.datetime.now()
-        response.payload = str(now)
-
     def dump_request_log(self):
         out = []
         out.append("Dumping %d requests for client %d"
@@ -313,59 +324,12 @@ class ClientConnection:
         return self.fd_handle is None
 
     def process_received(self, eventtime):
+        data = None
+
         try:
-            data, remote_address = self.sock.recvfrom(4096)
-            data_len = len(data)
-            ct_data = (ct.c_uint8 * data_len).from_buffer_copy(data)
-            pdu_ptr = coap_pdu_init(0, 0, 0, COAP_DEFAULT_MTU)
-
-            proto = coap_proto_t.COAP_PROTO_UDP
-
-            result = coap_pdu_parse(
-                proto,
-                ct.cast(ct_data, ct.POINTER(ct.c_uint8)),
-                data_len,
-                pdu_ptr
-            )
-
-            if result >= 1:
-                print("got {} from {}".format(data, remote_address))
-                pdu = CoapPDU(pdu_ptr)
-                print(pdu.uri)
-                if pdu.type == coap_pdu_type_t.COAP_MESSAGE_CON:
-                    print("COAP_MESSAGE_CON")
-                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_NON:
-                    print("COAP_MESSAGE_NON")
-                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_ACK:
-                    print("COAP_MESSAGE_ACK")
-                elif pdu.type == coap_pdu_type_t.COAP_MESSAGE_RST:
-                    print("COAP_MESSAGE_RST")
-
-                if pdu.code == coap_pdu_code_t.COAP_EMPTY_CODE:
-                    print("COAP_EMPTY_CODE")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_GET:
-                    print("COAP_REQUEST_CODE_GET")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_POST:
-                    print("COAP_REQUEST_CODE_POST")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_PUT:
-                    print("COAP_REQUEST_CODE_PUT")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_DELETE:
-                    print("COAP_REQUEST_CODE_DELETE")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_FETCH:
-                    print("COAP_REQUEST_CODE_FETCH")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_PATCH:
-                    print("COAP_REQUEST_CODE_PATCH")
-                elif pdu.code == coap_pdu_code_t.COAP_REQUEST_CODE_IPATCH:
-                    print("COAP_REQUEST_CODE_IPATCH")
-
-                res = self.coap.getResource(pdu.uri)
-                if res:
-                    handler = res.handlers.get(pdu.code, None)
-                    if handler:
-                        handler(self.coap, None, None, None)
-
-            else:
-                print("Failed to parse PDU!")
+            # Timeout value is used in the internal select. We already select-ed but doing it
+            # the second time probably won't be a problem.
+            self.server.coap.io_process(COAP_IO_NO_WAIT)
 
         except socket.error as e:
             # If bad file descriptor allow connection to be
@@ -375,14 +339,15 @@ class ClientConnection:
             else:
                 return
 
+        # if not data:
+        #     # Socket Closed
+        #     self.close()
+        #     return
 
-        if not data:
-            # Socket Closed
-            self.close()
-            return
-        requests = data.split(b'\x03')
-        requests[0] = self.partial_data + requests[0]
-        self.partial_data = requests.pop()
+        # requests = data.split(b'\x03')
+        # requests[0] = self.partial_data + requests[0]
+        # self.partial_data = requests.pop()
+        requests = []
         for req in requests:
             self.request_log.append((eventtime, req))
             try:
