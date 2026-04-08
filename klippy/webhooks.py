@@ -192,7 +192,8 @@ class ServerSocketUDP:
         self.printer = printer
         self.webhooks = webhooks
         self.reactor = printer.get_reactor()
-        self.sock = self.fd_handle = None
+        self.sock_fd = None
+        self.fd_handle = None
         self.clients = {}
         start_args = printer.get_start_args()
         server_address = start_args.get('apiserver')
@@ -202,39 +203,56 @@ class ServerSocketUDP:
             return
         self._remove_socket_file(server_address)
 
-        # # Creating the socket here.
-        # self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        # self.sock.setblocking(0)
-        # self.sock.bind(server_address)
-
         # endpoint creates the socket --------------------------------
         self.coap = CoapContext()
         ep = self.coap.addEndpoint("coap://%2Ftmp%2Fklippy_uds")
         #print(ep.uri)
-        # This is a C structure so accessing sock might be tricky.
-        c_ep_ptr = ep.lcoap_endpoint
-        sock_fd = c_ep_ptr.contents.sock.fd
+
+        self.sock_fd = self.coap.get_single_fd()
+
+        print("correct fd {}".format(self.sock_fd))
+        print(self.coap.get_fds().read_fds, self.coap.get_fds().write_fds)
+        print("self.coap.get_single_fd(): {}".format(self.coap.get_single_fd()))
 
         time_rs = CoapResource(self.coap, "time")
         time_rs.addHandler(self.time_handler)
         self.coap.addResource(time_rs)
+
+        info_rs = CoapResource(self.coap, "info")
+        info_rs.addHandler(self.info_handler)
+        self.coap.addResource(info_rs)
         # ------------------------------------------------------------
 
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM, fileno=sock_fd)
-        logging.info(f"CoAP server listening on {sock.getsockname()}")
-
-        client = ClientConnection(self, sock)
-        self.clients[client.uid] = client
+        self.fd_handle = self.reactor.register_fd(
+            self.sock_fd, self._handle_request)
 
         printer.register_event_handler(
             'klippy:disconnect', self._handle_disconnect)
         printer.register_event_handler(
             "klippy:analyze_shutdown", self._handle_analyze_shutdown)
 
+    def _handle_request(self, eventtime):
+        print("request incoming {}".format(eventtime))
+        self.coap.io_process(COAP_IO_NO_WAIT)
+
     def time_handler(self, resource, session, request, query, response):
         import datetime
         now = datetime.datetime.now()
         response.payload = str(now)
+
+    def info_handler(self, resource, session, request, query, response):
+        state_message, state = self.printer.get_state_message()
+        src_path = os.path.dirname(__file__)
+        klipper_path = os.path.normpath(os.path.join(src_path, ".."))
+        _response = {'state': state,
+                     'state_message': state_message,
+                     'hostname': socket.gethostname(),
+                     'klipper_path': klipper_path,
+                     'python_path': sys.executable,
+                     'process_id': os.getpid(),
+                     'user_id': os.getuid(),
+                     'group_id': os.getgid()}
+        response.payload = str(json.dumps(_response))
 
     def _handle_disconnect(self):
         for client in list(self.clients.values()):
@@ -324,13 +342,8 @@ class ClientConnection:
         return self.fd_handle is None
 
     def process_received(self, eventtime):
-        data = None
-
         try:
-            # Timeout value is used in the internal select. We already select-ed but doing it
-            # the second time probably won't be a problem.
-            self.server.coap.io_process(COAP_IO_NO_WAIT)
-
+            data = self.sock.recv(4096)
         except socket.error as e:
             # If bad file descriptor allow connection to be
             # closed by the data check
@@ -338,16 +351,13 @@ class ClientConnection:
                 data = b""
             else:
                 return
-
-        # if not data:
-        #     # Socket Closed
-        #     self.close()
-        #     return
-
-        # requests = data.split(b'\x03')
-        # requests[0] = self.partial_data + requests[0]
-        # self.partial_data = requests.pop()
-        requests = []
+        if not data:
+            # Socket Closed
+            self.close()
+            return
+        requests = data.split(b'\x03')
+        requests[0] = self.partial_data + requests[0]
+        self.partial_data = requests.pop()
         for req in requests:
             self.request_log.append((eventtime, req))
             try:
@@ -662,29 +672,3 @@ def add_early_printer_objects(printer):
     printer.add_object('webhooks', WebHooks(printer))
     GCodeHelper(printer)
     QueryStatusHelper(printer)
-
-    # def time_handler(resource, session, request, query, response):
-    #     import datetime
-    #     now = datetime.datetime.now()
-    #     response.payload = str(now)
-
-    # ctx = CoapContext()
-
-    # #ctx.addEndpoint("coap://localhost")
-    # ctx.addEndpoint("/tmp/klippy_uds")
-
-    # time_rs = CoapResource(ctx, "time")
-    # time_rs.addHandler(time_handler)
-    # ctx.addResource(time_rs)
-
-    # def callback_wrapper(ctx, ts: float):
-    #     print(ts)
-    #     ctx.io_process()
-
-    # handler = partial(callback_wrapper, ctx)
-
-    # coap_fd = coap_context_get_coap_fd(ctx.lcoap_ctx)
-
-    # printer.reactor.register_fd(coap_fd, handler)
-
-
