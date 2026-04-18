@@ -7,6 +7,7 @@ import logging, socket, os, sys, errno, collections
 import gcode
 
 from libcoapy import *
+import ctypes as ct
 from functools import partial
 
 try:
@@ -193,6 +194,7 @@ class ServerSocketUDP:
         self.webhooks = webhooks
         self.reactor = printer.get_reactor()
         self.sock_fd = None
+        self.sock = None
         self.fd_handle = None
         self.clients = {}
         start_args = printer.get_start_args()
@@ -203,36 +205,47 @@ class ServerSocketUDP:
             return
         self._remove_socket_file(server_address)
 
+        # COAP, for UDS file paths, usese %2F as separator.
+        server_address_for_coap = server_address.replace('/', '%2F')
+
         # endpoint creates the socket --------------------------------
         self.coap = CoapContext()
-        ep = self.coap.addEndpoint("coap://%2Ftmp%2Fklippy_uds")
+        ep = self.coap.addEndpoint("coap://" + server_address_for_coap)
         #print(ep.uri)
 
         self.sock_fd = self.coap.get_single_fd()
 
-        print("correct fd {}".format(self.sock_fd))
-        print(self.coap.get_fds().read_fds, self.coap.get_fds().write_fds)
-        print("self.coap.get_single_fd(): {}".format(self.coap.get_single_fd()))
-
-        time_rs = CoapResource(self.coap, "time")
-        time_rs.addHandler(self.time_handler)
-        self.coap.addResource(time_rs)
+        self.time_rs = CoapResource(self.coap, "time")
+        self.time_rs.addHandler(self.time_handler)
+        self.coap.addResource(self.time_rs)
 
         info_rs = CoapResource(self.coap, "info")
         info_rs.addHandler(self.info_handler)
         self.coap.addResource(info_rs)
         # ------------------------------------------------------------
 
-        self.fd_handle = self.reactor.register_fd(
-            self.sock_fd, self._handle_request)
+        # Hook up request handler on both timer and select/poll. The timer part is necessary
+        # because server initiated messages (notifications) require io_process firing.
+        self.fd_handle = self.reactor.register_fd(self.sock_fd, self._handle_request)
+        tim = self.reactor.register_callback(self._handle_request, self.reactor.monotonic() + 0.4)
 
         printer.register_event_handler(
             'klippy:disconnect', self._handle_disconnect)
         printer.register_event_handler(
             "klippy:analyze_shutdown", self._handle_analyze_shutdown)
 
+        self.count = 10
+
     def _handle_request(self, eventtime):
-        print("request incoming {}".format(eventtime))
+        tim = self.reactor.register_callback(self._handle_request, self.reactor.monotonic() + 0.4)
+        self.count -= 1
+        if self.count == 0:
+            self.count = 10
+            # This triggers when function returns errno 0
+            try:
+                ret = llapi.coap_resource_notify_observers(self.time_rs.lcoap_rs, None)
+            except OSError:
+                pass
         self.coap.io_process(COAP_IO_NO_WAIT)
 
     def time_handler(self, resource, session, request, query, response):
