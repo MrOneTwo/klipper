@@ -9,6 +9,7 @@ import gcode
 from libcoapy import *
 import ctypes as ct
 from functools import partial
+from typing import Protocol, ClassVar, Callable
 
 try:
     import msgspec
@@ -117,6 +118,11 @@ class WebRequest:
             self.response = {}
         return {"id": self.id, rtype: self.response}
 
+class ServerSocketProto(Protocol):
+    printer: Printer
+
+    def stats(self, eventtime): ...
+
 class ServerSocket:
     def __init__(self, webhooks, printer):
         self.printer = printer
@@ -188,7 +194,7 @@ class ServerSocket:
                     client.close()
         return False, ""
 
-class ServerSocketUDP:
+class ServerSocketCoap:
     def __init__(self, webhooks, printer):
         self.printer = printer
         self.webhooks = webhooks
@@ -219,9 +225,6 @@ class ServerSocketUDP:
         self.time_rs.addHandler(self.time_handler)
         self.coap.addResource(self.time_rs)
 
-        info_rs = CoapResource(self.coap, "info")
-        info_rs.addHandler(self.info_handler)
-        self.coap.addResource(info_rs)
         # ------------------------------------------------------------
 
         # Hook up request handler on both timer and select/poll. The timer part is necessary
@@ -432,6 +435,11 @@ class ClientConnection:
             self.is_blocking = False
         self.send_buffer = self.send_buffer[sent:]
 
+class WebHooksProto(Protocol):
+    printer: Printer
+
+    def register_endpoint(self, path: str, callback: Callable[[WebRequest], None]): ...
+
 class WebHooks:
     def __init__(self, printer):
         self.printer = printer
@@ -442,11 +450,129 @@ class WebHooks:
         self.register_endpoint("emergency_stop", self._handle_estop_request)
         self.register_endpoint("register_remote_method",
                                self._handle_rpc_registration)
-        self.sconn = ServerSocketUDP(self, printer)
+        self.sconn = ServerSocketCoap(self, printer)
 
     def register_endpoint(self, path, callback):
         if path in self._endpoints:
             raise WebRequestError("Path already registered to an endpoint")
+        self._endpoints[path] = callback
+
+    def register_mux_endpoint(self, path, key, value, callback):
+        prev = self._mux_endpoints.get(path)
+        if prev is None:
+            self.register_endpoint(path, self._handle_mux)
+            self._mux_endpoints[path] = prev = (key, {})
+        prev_key, prev_values = prev
+        if prev_key != key:
+            raise self.printer.config_error(
+                "mux endpoint %s %s %s may have only one key (%s)"
+                % (path, key, value, prev_key))
+        if value in prev_values:
+            raise self.printer.config_error(
+                "mux endpoint %s %s %s already registered (%s)"
+                % (path, key, value, prev_values))
+        prev_values[value] = callback
+
+    def _handle_mux(self, web_request):
+        key, values = self._mux_endpoints[web_request.get_method()]
+        if None in values:
+            key_param = web_request.get(key, None)
+        else:
+            key_param = web_request.get(key)
+        if key_param not in values:
+            raise web_request.error("The value '%s' is not valid for %s"
+                                    % (key_param, key))
+        values[key_param](web_request)
+
+    def _handle_list_endpoints(self, web_request):
+        web_request.send({'endpoints': list(self._endpoints.keys())})
+
+    def _handle_info_request(self, web_request):
+        client_info = web_request.get_dict('client_info', None)
+        if client_info is not None:
+            web_request.get_client_connection().set_client_info(client_info)
+        state_message, state = self.printer.get_state_message()
+        src_path = os.path.dirname(__file__)
+        klipper_path = os.path.normpath(os.path.join(src_path, ".."))
+        response = {'state': state,
+                    'state_message': state_message,
+                    'hostname': socket.gethostname(),
+                    'klipper_path': klipper_path,
+                    'python_path': sys.executable,
+                    'process_id': os.getpid(),
+                    'user_id': os.getuid(),
+                    'group_id': os.getgid()}
+        start_args = self.printer.get_start_args()
+        for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
+            response[sa] = start_args.get(sa)
+        web_request.send(response)
+
+    def _handle_estop_request(self, web_request):
+        self.printer.invoke_shutdown("Shutdown due to webhooks request")
+
+    def _handle_rpc_registration(self, web_request):
+        template = web_request.get_dict('response_template')
+        method = web_request.get_str('remote_method')
+        new_conn = web_request.get_client_connection()
+        logging.info("webhooks: registering remote method '%s' "
+                     "for connection id: %d" % (method, id(new_conn)))
+        self._remote_methods.setdefault(method, {})[new_conn] = template
+
+    def get_connection(self):
+        return self.sconn
+
+    def get_callback(self, path):
+        cb = self._endpoints.get(path, None)
+        if cb is None:
+            msg = "webhooks: No registered callback for path '%s'" % (path)
+            logging.info(msg)
+            raise WebRequestError(msg)
+        return cb
+
+    def get_status(self, eventtime):
+        state_message, state = self.printer.get_state_message()
+        return {'state': state, 'state_message': state_message}
+
+    def stats(self, eventtime):
+        return self.sconn.stats(eventtime)
+
+    def call_remote_method(self, method, **kwargs):
+        if method not in self._remote_methods:
+            raise self.printer.command_error(
+                "Remote method '%s' not registered" % (method))
+        conn_map = self._remote_methods[method]
+        valid_conns = {}
+        for conn, template in conn_map.items():
+            if not conn.is_closed():
+                valid_conns[conn] = template
+                out = {'params': kwargs}
+                out.update(template)
+                conn.send(out)
+        if not valid_conns:
+            del self._remote_methods[method]
+            raise self.printer.command_error(
+                "No active connections for method '%s'" % (method))
+        self._remote_methods[method] = valid_conns
+
+class WebHooksCoap:
+    def __init__(self, printer):
+        self.printer = printer
+        self._endpoints = {"list_endpoints": self._handle_list_endpoints}
+        self._remote_methods = {}
+        self._mux_endpoints = {}
+
+        self.sconn = ServerSocketCoap(self, printer)
+
+        self.register_endpoint("info", self._handle_info_request)
+        self.register_endpoint("emergency_stop", self._handle_estop_request)
+        self.register_endpoint("register_remote_method",
+                               self._handle_rpc_registration)
+
+    def register_endpoint(self, path, callback):
+        res = CoapResource(self.sconn.coap, path)
+        res.addHandler(callback)
+        self.sconn.coap.addResource(res)
+
         self._endpoints[path] = callback
 
     def register_mux_endpoint(self, path, key, value, callback):
@@ -682,6 +808,6 @@ class QueryStatusHelper:
         self._handle_query(web_request, is_subscribe=True)
 
 def add_early_printer_objects(printer):
-    printer.add_object('webhooks', WebHooks(printer))
+    printer.add_object('webhooks', WebHooksCoap(printer))
     GCodeHelper(printer)
     QueryStatusHelper(printer)
