@@ -558,20 +558,20 @@ class WebHooks:
 class WebHooksCoap:
     def __init__(self, printer):
         self.printer = printer
-        self._endpoints = {"list_endpoints": self._handle_list_endpoints}
         self._remote_methods = {}
         self._mux_endpoints = {}
+        self._endpoints = {}
 
         self.sconn = ServerSocketCoap(self, printer)
 
         self.register_endpoint("info", self._handle_info_request)
         self.register_endpoint("emergency_stop", self._handle_estop_request)
-        self.register_endpoint("register_remote_method",
-                               self._handle_rpc_registration)
+        self.register_endpoint("register_remote_method", self._handle_rpc_registration)
+        self.register_endpoint("list_endpoints", self._handle_list_endpoints)
 
-    def register_endpoint(self, path, callback):
+    def register_endpoint(self, path, callback: Callable[[CoapResource, CoapSession, CoapPDURequest, Union[str, None], CoapPDUResponse], None]):
         res = CoapResource(self.sconn.coap, path)
-        res.addHandler(callback)
+        res.addHandler(callback, coap_request_t.COAP_REQUEST_GET)
         self.sconn.coap.addResource(res)
 
         self._endpoints[path] = callback
@@ -603,33 +603,45 @@ class WebHooksCoap:
                                     % (key_param, key))
         values[key_param](web_request)
 
-    def _handle_list_endpoints(self, web_request):
-        web_request.send({'endpoints': list(self._endpoints.keys())})
+    def _handle_list_endpoints(self, resource, session, request, query, response):
+        async_hndl = None
+        try:
+            async_hndl = coap_find_async(session.lcoap_session, request.lcoap_token)
 
-    def _handle_info_request(self, web_request):
-        client_info = web_request.get_dict('client_info', None)
-        if client_info is not None:
-            web_request.get_client_connection().set_client_info(client_info)
+            payload = {'endpoints': list(self._endpoints.keys())}
+            response.payload = json_dumps(payload)
+            response.code = coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
+            # coap_free_async(session.lcoap_session, async_hndl)
+            print("RESOLVED!")
+        except llapi.NullPointer as e:
+            async_hndl = coap_register_async(session.lcoap_session, request.lcoap_pdu, 20)
+            print("DEFERRED to {}".format(async_hndl))
+            response.code = coap_pdu_code_t.COAP_EMPTY_CODE
+
+    def _handle_info_request(self, resource, session, request, query, response):
         state_message, state = self.printer.get_state_message()
         src_path = os.path.dirname(__file__)
         klipper_path = os.path.normpath(os.path.join(src_path, ".."))
-        response = {'state': state,
-                    'state_message': state_message,
-                    'hostname': socket.gethostname(),
-                    'klipper_path': klipper_path,
-                    'python_path': sys.executable,
-                    'process_id': os.getpid(),
-                    'user_id': os.getuid(),
-                    'group_id': os.getgid()}
+        payload = {'state': state,
+                   'state_message': state_message,
+                   'hostname': socket.gethostname(),
+                   'klipper_path': klipper_path,
+                   'python_path': sys.executable,
+                   'process_id': os.getpid(),
+                   'user_id': os.getuid(),
+                   'group_id': os.getgid()}
         start_args = self.printer.get_start_args()
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
-            response[sa] = start_args.get(sa)
-        web_request.send(response)
+            payload[sa] = start_args.get(sa)
+        response.payload = json_dumps(payload)
 
-    def _handle_estop_request(self, web_request):
+    def _handle_estop_request(self, resource, session, request, query, response):
         self.printer.invoke_shutdown("Shutdown due to webhooks request")
 
-    def _handle_rpc_registration(self, web_request):
+    def _handle_rpc_registration(self, resource, session, request, query, response):
+        # TODO(michalc): not ready
+        pass
+
         template = web_request.get_dict('response_template')
         method = web_request.get_str('remote_method')
         new_conn = web_request.get_client_connection()
