@@ -222,7 +222,7 @@ class ServerSocketCoap:
         self.sock_fd = self.coap.get_single_fd()
 
         self.time_rs = CoapResource(self.coap, "time")
-        self.time_rs.addHandler(self.time_handler)
+        self.time_rs.addHandler(self.time_handler, coap_request_t.COAP_REQUEST_GET)
         self.coap.addResource(self.time_rs)
 
         # ------------------------------------------------------------
@@ -230,7 +230,7 @@ class ServerSocketCoap:
         # Hook up request handler on both timer and select/poll. The timer part is necessary
         # because server initiated messages (notifications) require io_process firing.
         self.fd_handle = self.reactor.register_fd(self.sock_fd, self._handle_request)
-        tim = self.reactor.register_callback(self._handle_request, self.reactor.monotonic() + 0.4)
+        tim = self.reactor.register_timer(self._handle_request, self.reactor.monotonic() + 0.4)
 
         printer.register_event_handler(
             'klippy:disconnect', self._handle_disconnect)
@@ -240,7 +240,6 @@ class ServerSocketCoap:
         self.count = 10
 
     def _handle_request(self, eventtime):
-        tim = self.reactor.register_callback(self._handle_request, self.reactor.monotonic() + 0.4)
         self.count -= 1
         if self.count == 0:
             self.count = 10
@@ -250,8 +249,10 @@ class ServerSocketCoap:
             except OSError:
                 pass
         self.coap.io_process(COAP_IO_NO_WAIT)
+        return eventtime + 0.25
 
     def time_handler(self, resource, session, request, query, response):
+        observe = COAP_OPTION_OBSERVE in request.getOptions()
         import datetime
         now = datetime.datetime.now()
         response.payload = str(now)
