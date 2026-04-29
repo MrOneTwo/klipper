@@ -6,10 +6,11 @@
 import logging, socket, os, sys, errno, collections
 import gcode
 
-from libcoapy import *
+from libcoapy import CoapContext, CoapSession, CoapAsync, CoapResource, CoapPDURequest, CoapPDUResponse
+import libcoapy.llapi as llapi
 import ctypes as ct
 from functools import partial
-from typing import Protocol, ClassVar, Callable
+from typing import Protocol, ClassVar, Callable, Union
 import threading
 
 try:
@@ -139,7 +140,7 @@ class ServerSocket:
             return
         self._remove_socket_file(server_address)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.setblocking(0)
+        self.sock.setblocking(False)
         self.sock.bind(server_address)
         self.sock.listen(1)
         self.fd_handle = self.reactor.register_fd(
@@ -150,11 +151,12 @@ class ServerSocket:
             "klippy:analyze_shutdown", self._handle_analyze_shutdown)
 
     def _handle_accept(self, eventtime):
+        assert(self.sock is not None)
         try:
             sock, addr = self.sock.accept()
         except socket.error:
             return
-        sock.setblocking(0)
+        sock.setblocking(False)
         client = ClientConnection(self, sock)
         self.clients[client.uid] = client
 
@@ -223,7 +225,7 @@ class ServerSocketCoap:
         self.sock_fd = self.coap.get_single_fd()
 
         self.time_rs = CoapResource(self.coap, "time")
-        self.time_rs.addHandler(self.time_handler, coap_request_t.COAP_REQUEST_GET)
+        self.time_rs.addHandler(self.time_handler, llapi.coap_request_t.COAP_REQUEST_GET)
         self.coap.addResource(self.time_rs)
 
         # ------------------------------------------------------------
@@ -249,11 +251,11 @@ class ServerSocketCoap:
                 ret = llapi.coap_resource_notify_observers(self.time_rs.lcoap_rs, None)
             except OSError:
                 pass
-        self.coap.io_process(COAP_IO_NO_WAIT)
+        self.coap.io_process(llapi.COAP_IO_NO_WAIT)
         return eventtime + 0.25
 
     def time_handler(self, resource, session, request, query, response):
-        observe = COAP_OPTION_OBSERVE in request.getOptions()
+        observe = llapi.COAP_OPTION_OBSERVE in request.getOptions()
         import datetime
         now = datetime.datetime.now()
         response.payload = str(now)
@@ -574,7 +576,7 @@ class WebHooksCoap:
 
     def register_endpoint(self, path, callback: Callable[[CoapResource, CoapSession, CoapPDURequest, Union[str, None], CoapPDUResponse], None]):
         res = CoapResource(self.sconn.coap, path)
-        res.addHandler(callback, coap_request_t.COAP_REQUEST_GET)
+        res.addHandler(callback, llapi.coap_request_t.COAP_REQUEST_GET)
         self.sconn.coap.addResource(res)
 
         self._endpoints[path] = callback
@@ -613,7 +615,7 @@ class WebHooksCoap:
         if session.findAsyncResponse(request):
             payload = {'endpoints': list(self._endpoints.keys())}
             response.payload = json_dumps(payload)
-            response.code = coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
+            response.code = llapi.coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
         else:
             self.hndl = CoapAsync(session, request)
 
@@ -636,7 +638,7 @@ class WebHooksCoap:
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
             payload[sa] = start_args.get(sa)
         response.payload = json_dumps(payload)
-        response.code = coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
+        response.code = llapi.coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
 
     def _handle_estop_request(self, resource, session, request, query, response):
         self.printer.invoke_shutdown("Shutdown due to webhooks request")
