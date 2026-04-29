@@ -10,6 +10,7 @@ from libcoapy import *
 import ctypes as ct
 from functools import partial
 from typing import Protocol, ClassVar, Callable
+import threading
 
 try:
     import msgspec
@@ -569,6 +570,8 @@ class WebHooksCoap:
         self.register_endpoint("register_remote_method", self._handle_rpc_registration)
         self.register_endpoint("list_endpoints", self._handle_list_endpoints)
 
+        self.hndl = None
+
     def register_endpoint(self, path, callback: Callable[[CoapResource, CoapSession, CoapPDURequest, Union[str, None], CoapPDUResponse], None]):
         res = CoapResource(self.sconn.coap, path)
         res.addHandler(callback, coap_request_t.COAP_REQUEST_GET)
@@ -603,20 +606,19 @@ class WebHooksCoap:
                                     % (key_param, key))
         values[key_param](web_request)
 
-    def _handle_list_endpoints(self, resource, session, request, query, response):
-        async_hndl = None
-        try:
-            async_hndl = coap_find_async(session.lcoap_session, request.lcoap_token)
+    def _handle_async(self, asyncobj):
+        asyncobj.trigger()
 
+    def _handle_list_endpoints(self, resource, session, request, query, response):
+        if session.findAsyncResponse(request):
             payload = {'endpoints': list(self._endpoints.keys())}
             response.payload = json_dumps(payload)
             response.code = coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
-            # coap_free_async(session.lcoap_session, async_hndl)
-            print("RESOLVED!")
-        except llapi.NullPointer as e:
-            async_hndl = coap_register_async(session.lcoap_session, request.lcoap_pdu, 20)
-            print("DEFERRED to {}".format(async_hndl))
-            response.code = coap_pdu_code_t.COAP_EMPTY_CODE
+        else:
+            self.hndl = CoapAsync(session, request)
+
+            t = threading.Timer(2, self._handle_async, args=(self.hndl,))
+            t.start()
 
     def _handle_info_request(self, resource, session, request, query, response):
         state_message, state = self.printer.get_state_message()
@@ -634,6 +636,7 @@ class WebHooksCoap:
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
             payload[sa] = start_args.get(sa)
         response.payload = json_dumps(payload)
+        response.code = coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
 
     def _handle_estop_request(self, resource, session, request, query, response):
         self.printer.invoke_shutdown("Shutdown due to webhooks request")
