@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
 from . import probe
+from util import json_loads, json_dumps
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {

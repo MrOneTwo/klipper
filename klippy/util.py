@@ -6,6 +6,36 @@
 import sys, os, pty, fcntl, termios, signal, logging, json, time
 import subprocess, traceback, shlex
 
+try:
+    import msgspec
+except ImportError:
+    import json
+
+    # Json decodes strings as unicode types in Python 2.x.  This doesn't
+    # play well with some parts of Klipper (particularly displays), so we
+    # need to create an object hook. This solution borrowed from:
+    #
+    # https://stackoverflow.com/questions/956867/
+    #
+    json_loads_byteify = None
+    if sys.version_info.major < 3:
+        def json_loads_byteify(data, ignore_dicts=False):
+            if isinstance(data, unicode):
+                return data.encode('utf-8')
+            if isinstance(data, list):
+                return [json_loads_byteify(i, True) for i in data]
+            if isinstance(data, dict) and not ignore_dicts:
+                return {json_loads_byteify(k, True): json_loads_byteify(v, True)
+                        for k, v in data.items()}
+            return data
+    def json_dumps(obj):
+        return json.dumps(obj, separators=(',', ':')).encode()
+    def json_loads(data):
+        return json.loads(data, object_hook=json_loads_byteify)
+else:
+    json_dumps = msgspec.json.encode
+    json_loads = msgspec.json.decode
+
 
 ######################################################################
 # Low-level Unix commands
