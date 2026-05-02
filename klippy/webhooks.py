@@ -10,7 +10,8 @@ from libcoapy import CoapContext, CoapSession, CoapAsync, CoapResource, CoapPDUR
 import libcoapy.llapi as llapi
 import ctypes as ct
 from functools import partial
-from typing import Protocol, ClassVar, Callable, Union
+from typing import Callable, Union
+from types import *
 import threading
 from util import json_loads, json_dumps
 
@@ -90,11 +91,6 @@ class WebRequest:
             # send, default response is {}
             self.response = {}
         return {"id": self.id, rtype: self.response}
-
-class ServerSocketProto(Protocol):
-    printer: Printer
-
-    def stats(self, eventtime): ...
 
 class ServerSocket:
     def __init__(self, webhooks, printer):
@@ -409,11 +405,6 @@ class ClientConnection:
             self.reactor.set_fd_wake(self.fd_handle, True, False)
             self.is_blocking = False
         self.send_buffer = self.send_buffer[sent:]
-
-class WebHooksProto(Protocol):
-    printer: Printer
-
-    def register_endpoint(self, path: str, callback: Callable[[WebRequest], None]): ...
 
 class WebHooks:
     def __init__(self, printer):
