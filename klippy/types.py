@@ -1,4 +1,4 @@
-from typing import Protocol, ClassVar,
+from typing import Protocol, ClassVar
 
 class ServerSocketProto(Protocol):
     printer: Printer
