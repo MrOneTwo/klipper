@@ -11,7 +11,7 @@ import libcoapy.llapi as llapi
 import ctypes as ct
 from functools import partial
 from typing import Callable, Union
-from types import *
+from klippy_types import *
 import threading
 from util import json_loads, json_dumps
 
