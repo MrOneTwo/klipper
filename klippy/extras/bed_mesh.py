@@ -7,6 +7,7 @@ import logging, math, json, collections
 import copy
 from . import probe
 from util import json_loads, json_dumps, jsonify_result
+import webhooks_coap as whc
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {
@@ -1771,4 +1772,7 @@ class ProfileManager:
 
 
 def load_config(config):
-    return BedMesh(config)
+    printer = config.get_printer()
+    bm = BedMesh(config)
+    whc.coap_init_resources_bed_mesh(printer, bm)
+    return bm
