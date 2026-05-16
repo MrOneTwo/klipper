@@ -6,6 +6,7 @@
 import sys, os, pty, fcntl, termios, signal, logging, json, time
 import subprocess, traceback, shlex
 import functools
+import inspect
 
 try:
     import msgspec
@@ -38,16 +39,25 @@ else:
     json_loads = msgspec.json.decode
 
 def jsonify_result(func):
+    # I'm doing this because naively accessing _args indices isn't robust to handle
+    # calling decorated function on a class instance but also inside the class definition.
+    # The 'self' offsets the args collection with one additional element.
+    sig = inspect.signature(func)
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        query = str(args[4])
-        # args are a tuple so read only.
-        _args = list(args)
-        _args[4] = query.split('&')
-        payload = func(*_args, **kwargs)
-        # json_dumps makes b'null' out of None.
-        if payload != None:
-            _args[5].payload = json_dumps(payload)
+        bound_args = sig.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+
+        query = str(bound_args.arguments['query'])
+        bound_args.arguments['query'] = query.split('&')
+
+        payload = func(*bound_args.args, **bound_args.kwargs)
+
+        if payload is not None:
+            bound_args.arguments['response'].payload = json_dumps(payload)
+
+        return payload
     return wrapper
 
 

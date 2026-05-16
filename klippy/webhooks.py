@@ -186,7 +186,6 @@ class ServerSocketCoap:
         # endpoint creates the socket --------------------------------
         self.coap = CoapContext()
         ep = self.coap.addEndpoint("coap://" + server_address_for_coap)
-        #print(ep.uri)
 
         self.sock_fd = self.coap.get_single_fd()
 

@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math, logging, importlib
 import mcu, chelper, kinematics.extruder
+import webhooks_coap as whc
 
 # Common suffixes: _d is distance (in mm), _v is velocity (in
 #   mm/second), _v2 is velocity squared (mm^2/s^2), _t is time (in
@@ -603,7 +604,8 @@ class ToolHeadCommandHelper:
 
 def add_printer_objects(config):
     printer = config.get_printer()
-    printer.add_object('toolhead', ToolHead(config))
+    toolhead = ToolHead(config)
+    printer.add_object('toolhead', toolhead)
     ToolHeadCommandHelper(config)
     # Load default extruder objects
     kinematics.extruder.add_printer_objects(config)
@@ -612,3 +614,5 @@ def add_printer_objects(config):
                "manual_probe", "tuning_tower", "garbage_collection"]
     for module_name in modules:
         printer.load_object(config, module_name)
+
+    whc.coap_init_resources_toolhead(printer, toolhead)
