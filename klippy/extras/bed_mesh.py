@@ -4,8 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
+import copy
 from . import probe
-from util import json_loads, json_dumps
+from util import json_loads, json_dumps, jsonify_result
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {
@@ -289,11 +290,14 @@ class BedMesh:
             gcode_move.reset_last_position()
         else:
             gcmd.respond_info("No mesh loaded to offset")
-    def _handle_dump_request(self, web_request):
+    @jsonify_result
+    def _handle_dump_request(self, resource, session, request, query, response):
+        print(query)
         eventtime = self.printer.get_reactor().monotonic()
         prb = self.printer.lookup_object("probe", None)
         th_sts = self.printer.lookup_object("toolhead").get_status(eventtime)
         result = {"current_mesh": {}, "profiles": self.pmgr.get_profiles()}
+
         if self.z_mesh is not None:
             result["current_mesh"] = {
                 "name": self.z_mesh.get_profile_name(),
@@ -301,19 +305,22 @@ class BedMesh:
                 "mesh_matrix": self.z_mesh.get_mesh_matrix(),
                 "mesh_params": self.z_mesh.get_mesh_params()
             }
-        mesh_args = web_request.get_dict("mesh_args", {})
+
+        # mesh_args = web_request.get_dict("mesh_args", {})
         gcmd = None
-        if mesh_args:
-            gcmd = self.gcode.create_gcode_command("", "", mesh_args)
-            with self.gcode.get_mutex():
-                result["calibration"] = self.bmc.dump_calibration(gcmd)
-        else:
-            result["calibration"] = self.bmc.dump_calibration()
+        # if mesh_args:
+        #     gcmd = self.gcode.create_gcode_command("", "", mesh_args)
+        #     with self.gcode.get_mutex():
+        #         result["calibration"] = self.bmc.dump_calibration(gcmd)
+        # else:
+        #     result["calibration"] = self.bmc.dump_calibration()
         offsets = [0, 0, 0] if prb is None else prb.get_offsets(gcmd)
         result["probe_offsets"] = offsets
         result["axis_minimum"] = th_sts["axis_minimum"]
         result["axis_maximum"] = th_sts["axis_maximum"]
-        web_request.send(result)
+        # Returning the future payload, because setting actual response payload
+        # requires bytes object.
+        return result
 
 
 class ZrefMode:

@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, pty, fcntl, termios, signal, logging, json, time
 import subprocess, traceback, shlex
+import functools
 
 try:
     import msgspec
@@ -35,6 +36,19 @@ except ImportError:
 else:
     json_dumps = msgspec.json.encode
     json_loads = msgspec.json.decode
+
+def jsonify_result(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        query = str(args[4])
+        # args are a tuple so read only.
+        _args = list(args)
+        _args[4] = query.split('&')
+        payload = func(*_args, **kwargs)
+        # json_dumps makes b'null' out of None.
+        if payload != None:
+            _args[5].payload = json_dumps(payload)
+    return wrapper
 
 
 ######################################################################

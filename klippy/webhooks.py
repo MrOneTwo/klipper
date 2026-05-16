@@ -12,7 +12,7 @@ import ctypes as ct
 from functools import partial
 from typing import Callable, Union
 import threading
-from util import json_loads, json_dumps
+from util import jsonify_result
 
 REQUEST_LOG_SIZE = 20
 
@@ -528,16 +528,22 @@ class WebHooksCoap:
 
         self.sconn = ServerSocketCoap(self, printer)
 
-        self.register_endpoint("info", self._handle_info_request)
-        self.register_endpoint("emergency_stop", self._handle_estop_request)
-        self.register_endpoint("register_remote_method", self._handle_rpc_registration)
-        self.register_endpoint("list_endpoints", self._handle_list_endpoints)
-
         self.hndl = None
 
-    def register_endpoint(self, path, callback: Callable[[CoapResource, CoapSession, CoapPDURequest, Union[str, None], CoapPDUResponse], None]):
+        self.register_endpoint_read  = partial(self.register_endpoint, method=llapi.coap_request_t.COAP_REQUEST_GET)
+        self.register_endpoint_write = partial(self.register_endpoint, method=llapi.coap_request_t.COAP_REQUEST_POST)
+
+        self.register_endpoint_read("info", self._handle_info_request)
+        self.register_endpoint_write("emergency_stop", self._handle_estop_request)
+        self.register_endpoint_read("register_remote_method", self._handle_rpc_registration)
+        self.register_endpoint_read("list_endpoints", self._handle_list_endpoints)
+
+    def register_endpoint(self,
+                          path: str,
+                          callback: Callable[[CoapResource, CoapSession, CoapPDURequest, Union[str, None], CoapPDUResponse], None],
+                          method: llapi.coap_request_t = llapi.coap_request_t.COAP_REQUEST_GET):
         res = CoapResource(self.sconn.coap, path)
-        res.addHandler(callback, llapi.coap_request_t.COAP_REQUEST_GET)
+        res.addHandler(callback, method)
         self.sconn.coap.addResource(res)
 
         self._endpoints[path] = callback
@@ -572,17 +578,18 @@ class WebHooksCoap:
     def _handle_async(self, asyncobj):
         asyncobj.trigger()
 
+    @jsonify_result
     def _handle_list_endpoints(self, resource, session, request, query, response):
         if session.findAsyncResponse(request):
             payload = {'endpoints': list(self._endpoints.keys())}
-            response.payload = json_dumps(payload)
-            response.code = llapi.coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
+            return payload
         else:
             self.hndl = CoapAsync(session, request)
 
             t = threading.Timer(2, self._handle_async, args=(self.hndl,))
             t.start()
 
+    @jsonify_result
     def _handle_info_request(self, resource, session, request, query, response):
         state_message, state = self.printer.get_state_message()
         src_path = os.path.dirname(__file__)
@@ -598,8 +605,7 @@ class WebHooksCoap:
         start_args = self.printer.get_start_args()
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
             payload[sa] = start_args.get(sa)
-        response.payload = json_dumps(payload)
-        response.code = llapi.coap_pdu_code_t.COAP_RESPONSE_CODE_CONTENT
+        return payload
 
     def _handle_estop_request(self, resource, session, request, query, response):
         self.printer.invoke_shutdown("Shutdown due to webhooks request")
