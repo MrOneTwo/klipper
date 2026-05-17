@@ -1,6 +1,7 @@
 from libcoapy import CoapContext, CoapSession, CoapAsync, CoapResource, CoapPDURequest, CoapPDUResponse
 import libcoapy.llapi as llapi
 from util import jsonify_result
+from functools import partial
 
 
 printer = None
@@ -77,6 +78,7 @@ def coap_init_resources_bed_mesh(obj_printer, obj_bed_mesh):
         webhooks.register_endpoint_read(f'{path_root}/mesh_min', bed_mesh_handler_mesh_min)
         webhooks.register_endpoint_read(f'{path_root}/mesh_max', bed_mesh_handler_mesh_max)
         webhooks.register_endpoint_read(f'{path_root}/profiles', bed_mesh_handler_profiles)
+        webhooks.register_endpoint_read(f'{path_root}/calibrate', bed_mesh_handler_calibrate)
 
 @jsonify_result
 def bed_mesh_handler(resource, session, request, query, response):
@@ -111,6 +113,48 @@ def bed_mesh_handler_mesh_matrix(resource, session, request, query, response):
     result = bed_mesh.get_status(printer.get_reactor().NOW).get("mesh_matrix", [])
 
     return result
+
+@jsonify_result
+def bed_mesh_handler_calibrate(resource, session, request, query, response):
+    '''
+    This function, when called for the first time, creates an async object.
+    The second time this function gets called when async object gets triggered.
+    '''
+    profile = None
+    async_hndl = None
+
+    for el in query:
+        if el.startswith('profile='):
+            try:
+                profile = el.split('=')[1]
+                break
+            except (IndexError, ValueError):
+                response.code = llapi.coap_pdu_code_t.COAP_RESPONSE_CODE_BAD_REQUEST
+                return None
+
+    if session.findAsyncResponse(request):
+        payload = bed_mesh.pmgr.get_profiles()[profile]
+        return payload
+    else:
+        async_hndl = CoapAsync(session, request)
+
+    if async_hndl:
+        gcode = f"G28";
+        # run_script in a blocking call.
+        printer.lookup_object('gcode').run_script(gcode)
+
+        # Give the bedmesh way to signal that calibration has been completed.
+        resolve = partial(bed_mesh_calibrate_resolve, async_obj=async_hndl)
+        bed_mesh.register_calibration_external_finalize(profile, resolve)
+
+        gcode = f"BED_MESH_CALIBRATE PROFILE='{profile}'";
+        printer.lookup_object('gcode').run_script(gcode)
+
+        # I'd prefer to register register_calibration_external_finalize after running script
+        # because what if running the script fails?
+
+def bed_mesh_calibrate_resolve(profile_name, async_obj):
+    async_obj.trigger()
 
 @jsonify_result
 def bed_mesh_handler_profiles(resource, session, request, query, response):

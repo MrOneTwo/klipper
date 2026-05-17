@@ -134,6 +134,7 @@ class BedMesh:
         gcode_move.set_move_transform(self)
         # initialize status dict
         self.update_status()
+        self.external_finalize = {}
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
         self.bmc.print_generated_points(logging.info, truncate=True)
@@ -322,6 +323,8 @@ class BedMesh:
         # Returning the future payload, because setting actual response payload
         # requires bytes object.
         return result
+    def register_calibration_external_finalize(self, key: str, callable):
+        self.external_finalize[key] = callable
 
 
 class ZrefMode:
@@ -795,6 +798,8 @@ class BedMeshCalibrate:
         self.gcode.respond_info("Mesh Bed Leveling Complete")
         if self._profile_name is not None:
             self.bedmesh.save_profile(self._profile_name)
+            self.bedmesh.external_finalize[self._profile_name](self._profile_name)
+            del self.bedmesh.external_finalize[self._profile_name]
     def _dump_points(self, probed_pts, corrected_pts):
         # logs generated points with offset applied, points received
         # from the finalize callback, and the list of corrected points
